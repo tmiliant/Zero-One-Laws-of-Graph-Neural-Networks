@@ -52,6 +52,10 @@ class BaseGNNLayer(nn.Module):
 
         next_node_feats = node_feats_self + node_feats_neigh
         return next_node_feats
+    
+    def to(self, device):
+        self.w_self = self.w_self.to(device)
+        self.w_neigh = self.w_neigh.to(device)
 
 
 class BaseGNNModule(nn.Module):
@@ -67,6 +71,10 @@ class BaseGNNModule(nn.Module):
         for layer in self.layers:
             x = self.act_fn(layer(x, adj_matrix))
         return x
+    
+    def to(self, device):
+        for layer in self.layers:
+            layer.to(device)
 
 
 class MLPModule(nn.Module):
@@ -84,6 +92,9 @@ class MLPModule(nn.Module):
         for layer in self.layers:
             x = self.act_fn(layer(x))
         return torch.sigmoid(x)
+    
+    def to(self, device):
+        self.layers.to(device)
 
 
 gnns = []
@@ -122,46 +133,53 @@ results_index = 0
 
 
 # Create plot with x-axis an increasing seq of number of graph nodes.
-for graph_dim in NUM_NODES:
-    for base_gnn, mlp, mpnn_idx in zip(gnns, mlps, range(NUM_MODELS)):
-        # Generate 32 graphs for each such graph dimension, to keep
-        # track of the proportion that is classified as 1.
-        classifications = []
+with torch.no_grad():
+    for graph_dim in NUM_NODES:
+        for base_gnn, mlp, mpnn_idx in zip(gnns, mlps, range(NUM_MODELS)):
+            # Generate 32 graphs for each such graph dimension, to keep
+            # track of the proportion that is classified as 1.
+            classifications = []
 
-        for idx in tqdm(range(2**5), desc=f"MPNN {mpnn_idx}, {graph_dim} nodes"):
-            # Generate graph to be fed to the BaseGNN.
-            half_matrix = torch.bernoulli(
-                ER_MODEL_R
-                * (torch.triu(torch.ones(graph_dim, graph_dim)) - torch.eye(graph_dim))
-            )
-            adj_matrix = half_matrix + half_matrix.T
-            initial_node_feats = torch.rand(graph_dim, MPNN_DIM)
+            base_gnn.to(device)
+            mlp.to(device)
 
-            # Obtain final mean-pooled embedding vector over all graph_dim nodes.
-            output = base_gnn(initial_node_feats, adj_matrix).mean(axis=0)
+            for idx in tqdm(range(2**5), desc=f"MPNN {mpnn_idx}, {graph_dim} nodes"):
+                # Generate graph to be fed to the BaseGNN.
+                half_matrix = torch.bernoulli(
+                    ER_MODEL_R
+                    * (torch.triu(torch.ones(graph_dim, graph_dim)) - torch.eye(graph_dim))
+                )
+                adj_matrix = half_matrix + half_matrix.T
+                initial_node_feats = torch.rand(graph_dim, MPNN_DIM)
 
-            # Apply MLP classifier to the resulting output.
-            apply_classifier = mlp(output)
+                adj_matrix = adj_matrix.to(device)
+                initial_node_feats = initial_node_feats.to(device)
 
-            # If smaller than 1/2, output 0, else output 1.
-            if apply_classifier <= 0.5:
-                classifications.append(0)
-            else:
-                classifications.append(1)
+                # Obtain final mean-pooled embedding vector over all graph_dim nodes.
+                output = base_gnn(initial_node_feats, adj_matrix).mean(axis=0)
 
-        # Calculate proportion of graphs classified as 1.
-        classifications = np.array(classifications)
-        proportion = (classifications == 1).mean()
+                # Apply MLP classifier to the resulting output.
+                apply_classifier = mlp(output)
 
-        results.loc[results_index] = [
-            MPNN_DIM,
-            ER_MODEL_R,
-            NUM_LAYERS,
-            mpnn_idx,
-            graph_dim,
-            proportion,
-        ]
-        results_index += 1
+                # If smaller than 1/2, output 0, else output 1.
+                if apply_classifier <= 0.5:
+                    classifications.append(0)
+                else:
+                    classifications.append(1)
 
-    results.to_csv(CSV_PATH, index=False)
-    print(results.tail(NUM_MODELS))
+            # Calculate proportion of graphs classified as 1.
+            classifications = np.array(classifications)
+            proportion = (classifications == 1).mean()
+
+            results.loc[results_index] = [
+                MPNN_DIM,
+                ER_MODEL_R,
+                NUM_LAYERS,
+                mpnn_idx,
+                graph_dim,
+                proportion,
+            ]
+            results_index += 1
+
+        results.to_csv(CSV_PATH, index=False)
+        print(results.tail(NUM_MODELS))
