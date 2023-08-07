@@ -10,7 +10,8 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cp
 torch.manual_seed(0)
 
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
-CSV_PATH = os.path.join(SCRIPT_PATH, "results", "sum-gnn.csv")
+EXPERIMENTS_DIR = os.path.normpath(SCRIPT_PATH + "/..")
+CSV_PATH = os.path.join(EXPERIMENTS_DIR, "results", "sum-gnn.csv")
 THRESHOLD = 1
 NUM_NODES = [
     10,
