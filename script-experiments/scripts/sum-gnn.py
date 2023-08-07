@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,6 +7,7 @@ import numpy as np
 from numpy import inf
 from tqdm import tqdm
 import pandas as pd
+import time
 
 if not torch.cuda.is_available():
     raise Exception("CUDA not available")
@@ -27,12 +29,13 @@ NUM_NODES = [
     15000,
     20000,
     50000,
+    100000,
 ]
 MPNN_DIM = 64
 NUM_LAYERS_LIST = [3]
 ER_MODEL_R = 0.5
 NUM_MODELS = 10
-MOVE_TO_GPU_TO_SYMMETRIZE_THRESHOLD = 50000
+SYMMETRIZE_BATCH_SIZE = 10**7
 SEED = 2343
 
 
@@ -147,7 +150,7 @@ for graph_dim in NUM_NODES:
         for base_gnn, mlp, mpnn_idx in zip(
             gnns[num_layers], mlps[num_layers], range(NUM_MODELS)
         ):
-            torch.manual_seed(SEED)
+            torch.manual_seed(SEED + mpnn_idx + num_layers + graph_dim)
 
             classifications = []
 
@@ -157,16 +160,27 @@ for graph_dim in NUM_NODES:
             for idx in tqdm(
                 range(2**5), desc=f"Num layers {num_layers}, MPNN {mpnn_idx}"
             ):
-                # adj_matrix = generate_adjacency_matrix(graph_dim, ER_MODEL_R, RANDOM_NUMBERS_SIZE)
                 adj_matrix = torch.cuda.FloatTensor(graph_dim, graph_dim).uniform_(
                     0, ER_MODEL_R
                 )
-                adj_matrix.triu_(diagonal=1)
-                temp_device = device
-                if graph_dim >= MOVE_TO_GPU_TO_SYMMETRIZE_THRESHOLD:
-                    adj_matrix = adj_matrix.to("cpu")
-                    temp_device = "cpu"
-                adj_matrix = adj_matrix + adj_matrix.T + torch.eye(graph_dim, device=temp_device)
+                rows_per_batch = max(
+                    1, min(graph_dim, math.floor(SYMMETRIZE_BATCH_SIZE / graph_dim))
+                )
+                for batch_start in range(0, graph_dim, rows_per_batch):
+                    batch_end = min(batch_start + rows_per_batch, graph_dim)
+                    rows_this_batch = batch_end - batch_start
+                    idx = torch.arange(graph_dim, device=device).tile(rows_this_batch)
+                    idy = torch.arange(
+                        batch_start, batch_end, device=device
+                    ).repeat_interleave(graph_dim)
+                    triu_mask = idx < idy
+                    idx = idx[triu_mask]
+                    idy = idy[triu_mask]
+                    adj_matrix[idx, idy] = adj_matrix[idy, idx]
+                adj_matrix[
+                    torch.arange(graph_dim, device=device),
+                    torch.arange(graph_dim, device=device),
+                ] = 1
                 initial_node_feats = torch.cuda.FloatTensor(
                     graph_dim, MPNN_DIM
                 ).uniform_(0, 1)
