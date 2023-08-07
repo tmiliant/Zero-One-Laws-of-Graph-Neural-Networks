@@ -30,7 +30,6 @@ NUM_NODES = [
 ]
 MPNN_DIM = 64
 NUM_LAYERS_LIST = [3]
-NUM_LAYERS_LIST = [1]
 ER_MODEL_R = 0.5
 NUM_MODELS = 10
 MOVE_TO_GPU_TO_SYMMETRIZE_THRESHOLD = 50000
@@ -163,9 +162,11 @@ for graph_dim in NUM_NODES:
                     0, ER_MODEL_R
                 )
                 adj_matrix.triu_(diagonal=1)
+                temp_device = device
                 if graph_dim >= MOVE_TO_GPU_TO_SYMMETRIZE_THRESHOLD:
                     adj_matrix = adj_matrix.to("cpu")
-                adj_matrix = adj_matrix + adj_matrix.T + torch.eye(graph_dim)
+                    temp_device = "cpu"
+                adj_matrix = adj_matrix + adj_matrix.T + torch.eye(graph_dim, device=temp_device)
                 initial_node_feats = torch.cuda.FloatTensor(
                     graph_dim, MPNN_DIM
                 ).uniform_(0, 1)
