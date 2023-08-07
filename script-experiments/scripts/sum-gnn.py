@@ -1,13 +1,15 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from numpy import inf
 from tqdm import tqdm
 import pandas as pd
 
-device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-torch.manual_seed(0)
+if not torch.cuda.is_available():
+    raise Exception("CUDA not available")
+device = torch.device("cuda")
 
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 EXPERIMENTS_DIR = os.path.normpath(SCRIPT_PATH + "/..")
@@ -25,15 +27,14 @@ NUM_NODES = [
     15000,
     20000,
     50000,
-    100000,
-    150000,
-    200000,
-    500000,
 ]
 MPNN_DIM = 64
-NUM_LAYERS = 3
+NUM_LAYERS_LIST = [3]
+NUM_LAYERS_LIST = [1]
 ER_MODEL_R = 0.5
 NUM_MODELS = 10
+MOVE_TO_GPU_TO_SYMMETRIZE_THRESHOLD = 50000
+SEED = 2343
 
 
 def act_fn(x):
@@ -53,7 +54,7 @@ class BaseGNNLayer(nn.Module):
 
         next_node_feats = node_feats_self + node_feats_neigh
         return next_node_feats
-    
+
     def to(self, device):
         self.w_self = self.w_self.to(device)
         self.w_neigh = self.w_neigh.to(device)
@@ -72,7 +73,7 @@ class BaseGNNModule(nn.Module):
         for layer in self.layers:
             x = self.act_fn(layer(x, adj_matrix))
         return x
-    
+
     def to(self, device):
         for layer in self.layers:
             layer.to(device)
@@ -93,32 +94,35 @@ class MLPModule(nn.Module):
         for layer in self.layers:
             x = self.act_fn(layer(x))
         return torch.sigmoid(x)
-    
+
     def to(self, device):
         self.layers.to(device)
 
 
-gnns = []
-mlps = []
-for i in range(NUM_MODELS):
-    gnns.append(
-        BaseGNNModule(
-            input_dim=MPNN_DIM,
-            hidden_dim=MPNN_DIM,
-            output_dim=MPNN_DIM,
-            num_layers=NUM_LAYERS,
-            act_fn=act_fn,
+gnns = {}
+mlps = {}
+for num_layers in NUM_LAYERS_LIST:
+    gnns[num_layers] = []
+    mlps[num_layers] = []
+    for i in range(NUM_MODELS):
+        gnns[num_layers].append(
+            BaseGNNModule(
+                input_dim=MPNN_DIM,
+                hidden_dim=MPNN_DIM,
+                output_dim=MPNN_DIM,
+                num_layers=num_layers,
+                act_fn=act_fn,
+            )
         )
-    )
-    mlps.append(
-        MLPModule(
-            input_dim=MPNN_DIM,
-            hidden_dim=100,
-            output_dim=1,
-            num_layers=2,
-            act_fn=torch.tanh,
+        mlps[num_layers].append(
+            MLPModule(
+                input_dim=MPNN_DIM,
+                hidden_dim=100,
+                output_dim=1,
+                num_layers=2,
+                act_fn=torch.tanh,
+            )
         )
-    )
 
 results = pd.DataFrame(
     {
@@ -134,24 +138,37 @@ results_index = 0
 
 
 # Create plot with x-axis an increasing seq of number of graph nodes.
-with torch.no_grad():
-    for graph_dim in NUM_NODES:
-        for base_gnn, mlp, mpnn_idx in zip(gnns, mlps, range(NUM_MODELS)):
-            # Generate 32 graphs for each such graph dimension, to keep
-            # track of the proportion that is classified as 1.
+for graph_dim in NUM_NODES:
+    print()
+    print("=======================================")
+    print(f"Number of nodes: {graph_dim}")
+    print("=======================================")
+
+    for num_layers in NUM_LAYERS_LIST:
+        for base_gnn, mlp, mpnn_idx in zip(
+            gnns[num_layers], mlps[num_layers], range(NUM_MODELS)
+        ):
+            torch.manual_seed(SEED)
+
             classifications = []
 
             base_gnn.to(device)
             mlp.to(device)
 
-            for idx in tqdm(range(2**5), desc=f"MPNN {mpnn_idx}, {graph_dim} nodes"):
-                # Generate graph to be fed to the BaseGNN.
-                half_matrix = torch.bernoulli(
-                    ER_MODEL_R
-                    * (torch.triu(torch.ones(graph_dim, graph_dim)) - torch.eye(graph_dim))
+            for idx in tqdm(
+                range(2**5), desc=f"Num layers {num_layers}, MPNN {mpnn_idx}"
+            ):
+                # adj_matrix = generate_adjacency_matrix(graph_dim, ER_MODEL_R, RANDOM_NUMBERS_SIZE)
+                adj_matrix = torch.cuda.FloatTensor(graph_dim, graph_dim).uniform_(
+                    0, ER_MODEL_R
                 )
-                adj_matrix = half_matrix + half_matrix.T
-                initial_node_feats = torch.rand(graph_dim, MPNN_DIM)
+                adj_matrix.triu_(diagonal=1)
+                if graph_dim >= MOVE_TO_GPU_TO_SYMMETRIZE_THRESHOLD:
+                    adj_matrix = adj_matrix.to("cpu")
+                adj_matrix = adj_matrix + adj_matrix.T + torch.eye(graph_dim)
+                initial_node_feats = torch.cuda.FloatTensor(
+                    graph_dim, MPNN_DIM
+                ).uniform_(0, 1)
 
                 adj_matrix = adj_matrix.to(device)
                 initial_node_feats = initial_node_feats.to(device)
@@ -168,6 +185,8 @@ with torch.no_grad():
                 else:
                     classifications.append(1)
 
+                del adj_matrix
+
             # Calculate proportion of graphs classified as 1.
             classifications = np.array(classifications)
             proportion = (classifications == 1).mean()
@@ -175,7 +194,7 @@ with torch.no_grad():
             results.loc[results_index] = [
                 MPNN_DIM,
                 ER_MODEL_R,
-                NUM_LAYERS,
+                num_layers,
                 mpnn_idx,
                 graph_dim,
                 proportion,
